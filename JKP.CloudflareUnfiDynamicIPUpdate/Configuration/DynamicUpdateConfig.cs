@@ -1,0 +1,23 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace JKP.CloudflareDynamicIPUpdate.Configuration
+{
+    public class DynamicUpdateConfig
+    {
+        public string Domain { get; set; }
+
+        public bool UpdateIPv4 { get; set; } = true;
+
+        public bool UpdateIPv6 { get; set;} = true;
+
+        public int CheckInterval { get; set; } = 300;
+
+        public SshConfig Ssh { get; set; }
+
+        public CloudflareConfig Cloudflare { get; set; }
+    }
+}
