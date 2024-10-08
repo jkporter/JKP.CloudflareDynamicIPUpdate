@@ -6,7 +6,7 @@ namespace JKP.CloudflareDynamicIPUpdate.Serialization;
 
 internal class PhysicalAddressConverter : JsonConverter<PhysicalAddress>
 {
-    public override PhysicalAddress? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    public override PhysicalAddress Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         return PhysicalAddress.Parse(reader.GetString() ?? throw new JsonException());
     }

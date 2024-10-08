@@ -1,9 +1,11 @@
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Text.Json;
 using CloudFlare.Client;
 using CloudFlare.Client.Api.Result;
+using CloudFlare.Client.Api.Zones;
 using CloudFlare.Client.Api.Zones.DnsRecord;
 using CloudFlare.Client.Enumerators;
 using JKP.CloudflareDynamicIPUpdate.Configuration;
@@ -16,6 +18,10 @@ namespace JKP.CloudflareDynamicIPUpdate;
 public class Worker : BackgroundService
 {
     private static readonly IPAddressEqualityComparer IPAddressEqualityComparer = new();
+
+    public static readonly TimeSpan LifeTimeForever = TimeSpan.FromSeconds(4294967295U);
+
+    private IReadOnlyList<Zone> _zones = [];
 
     private static readonly JsonSerializerOptions JsonSerializerOptions = new()
     {
@@ -111,6 +117,21 @@ public class Worker : BackgroundService
         }
     }
 
+    private async Task<Zone?> GetZone(string hostName, CancellationToken cancellationToken = default)
+    {
+        var zone = _zones.SingleOrDefault(zone => hostName.EndsWith(zone.Name, StringComparison.InvariantCultureIgnoreCase));
+        if (zone is not null)
+            return zone;
+
+        using var client = new CloudFlareClient(_dynamicUpdateConfig.Cloudflare.ApiToken);
+        _logger.LogInformation("Searching for zone encompassing {hostName}", hostName);
+
+        _zones = (await client.Zones.GetAsync(cancellationToken: cancellationToken)).Result;
+        zone = _zones.SingleOrDefault(zone => hostName.EndsWith(zone.Name, StringComparison.InvariantCultureIgnoreCase));
+
+        return zone;
+    }
+
     private IEnumerable<IPAddress> GetIPAddresses(IReadOnlyList<AddressInformation> addressInformation)
     {
         return addressInformation
@@ -121,21 +142,7 @@ public class Worker : BackgroundService
 
     private async Task UpdateDnsRecords(string hostName, IEnumerable<IPAddress> ipAddresses, CancellationToken cancellationToken = default)
     {
-        var ipAddressesByDnsRecordType = ipAddresses.ToDictionary(ipAddress => ipAddress.AddressFamily switch
-        {
-            AddressFamily.InterNetwork => DnsRecordType.A,
-            AddressFamily.InterNetworkV6 => DnsRecordType.Aaaa,
-            _ => throw new NotSupportedException()
-        }, ipAddress => ipAddress);
-
-        using var client = new CloudFlareClient(_dynamicUpdateConfig.Cloudflare.ApiToken);
-        _logger.LogInformation("Searching for zone encompassing {hostName}", hostName);
-
-        var zones = await client.Zones.GetAsync(cancellationToken: cancellationToken);
-
-        var zone = zones.Result.SingleOrDefault(zone =>
-            hostName.EndsWith(zone.Name, StringComparison.InvariantCultureIgnoreCase));
-
+        var zone = await GetZone(hostName, cancellationToken);
         if (zone == null)
         {
             _logger.LogError("Could not find zone for {hostName}.", hostName);
@@ -144,54 +151,81 @@ public class Worker : BackgroundService
 
         _logger.LogInformation("Found zone {zone} encompassing {hostName}", zone.Name, hostName);
 
-        var dnsRecords = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName },
-            cancellationToken: cancellationToken)).Result.Where(dnsRecord =>
-            dnsRecord.Type is DnsRecordType.A && _dynamicUpdateConfig.UpdateIPv4 ||
-            dnsRecord.Type is DnsRecordType.Aaaa && _dynamicUpdateConfig.UpdateIPv6);
+        using var client = new CloudFlareClient(_dynamicUpdateConfig.Cloudflare.ApiToken);
+        var dnsRecordsByType = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName },
+                cancellationToken: cancellationToken)).Result
+            .Where(dnsRecord => dnsRecord.Type is DnsRecordType.A or DnsRecordType.Aaaa)
+            .Select((dnsRecord,index) => (DnsRecord: dnsRecord, Order: index +1))
+            .GroupBy(tuple => tuple.DnsRecord.Type)
+            .ToDictionary(dnsRecord => dnsRecord.Key, dnsRecord => dnsRecord.ToList());
 
-        foreach (var dnsRecord in dnsRecords)
+        foreach (var ipAddress in ipAddresses)
         {
-            switch (ipAddressesByDnsRecordType.TryGetValue(dnsRecord.Type, out var ipAddress))
+            DnsRecordType? matchingDnsRecordType = ipAddress.AddressFamily switch
             {
-                case false:
-                    {
-                        _logger.LogInformation("Removing {dnsRecordType} record for {hostname}", AsString(dnsRecord.Type),
-                            hostName);
-                        var ex = GetException(
-                            await client.Zones.DnsRecords.DeleteAsync(zone.Id, dnsRecord.Id, cancellationToken));
-                        if (ex is not null)
-                            throw ex;
-                    }
-                    break;
-                case true when !IPAddress.TryParse(dnsRecord.Content, out var content) || !ipAddress!.Equals(content):
-                    {
-                        _logger.LogInformation(
-                            "Updating {dnsRecordType} record for {hostname} with from {currentIPAddress} to {ipAddress}",
-                            AsString(dnsRecord.Type), hostName,
-                            content, ipAddress);
-                        var ex = GetException(await client.Zones.DnsRecords.UpdateAsync(zone.Id, dnsRecord.Id,
-                            new ModifiedDnsRecord
-                            { Content = ipAddress!.ToString(), Name = dnsRecord.Name, Type = dnsRecord.Type },
-                            cancellationToken));
-                        if (ex is not null)
-                            throw ex;
-                    }
-                    goto default;
-                case true:
+                AddressFamily.InterNetwork => DnsRecordType.A,
+                AddressFamily.InterNetworkV6 => DnsRecordType.Aaaa,
+                _ => null
+            };
+
+            if (matchingDnsRecordType is null)
+            {
+                continue;
+            }
+
+            var matchingDnsRecordsForAddressFamily = dnsRecordsByType.TryGetValue(matchingDnsRecordType.Value, out var value)
+                ? value
+                : [];
+            if (matchingDnsRecordsForAddressFamily.Count == 0)
+            {
+                _logger.LogInformation("Creating {dnsRecordType} record for {hostname} with {ipAddress}",
+                    AsString(matchingDnsRecordType.Value), hostName, ipAddress);
+                var ex = GetException(await client.Zones.DnsRecords.AddAsync(zone.Id,
+                    new NewDnsRecord
+                    { Name = hostName, Content = ipAddress.ToString(), Type = matchingDnsRecordType.Value },
+                    cancellationToken));
+                if (ex is not null)
+                    throw ex;
+            }
+            else
+            {
+                var matchingDnsRecords = matchingDnsRecordsForAddressFamily.Where(tuple =>
+                    IPAddress.TryParse(tuple.DnsRecord.Content, out var content) && Equals(content, ipAddress)).ToArray();
+
+                if (matchingDnsRecords.Length > 0)
+                {
                     _logger.LogInformation("The {dnsRecordType} record does not require updating.",
-                        AsString(dnsRecord.Type));
-                    goto default;
-                default:
-                    ipAddressesByDnsRecordType.Remove(dnsRecord.Type);
-                    break;
+                        AsString(matchingDnsRecords[0].DnsRecord.Type));
+                    matchingDnsRecordsForAddressFamily.Remove(matchingDnsRecords[0]);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Updating {dnsRecordType} record for {hostname} with from {currentIPAddress} to {ipAddress}",
+                        AsString(matchingDnsRecordsForAddressFamily[0].DnsRecord.Type), hostName,
+                        matchingDnsRecordsForAddressFamily[0].DnsRecord.Content, ipAddress);
+                    var ex = GetException(await client.Zones.DnsRecords.UpdateAsync(zone.Id, matchingDnsRecordsForAddressFamily[0].DnsRecord.Id,
+                        new ModifiedDnsRecord
+                        {
+                            Content = ipAddress.ToString(),
+                            Name = matchingDnsRecordsForAddressFamily[0].DnsRecord.Name,
+                            Type = matchingDnsRecordsForAddressFamily[0].DnsRecord.Type
+                        },
+                        cancellationToken));
+                    if (ex is not null)
+                        throw ex;
+
+                    matchingDnsRecordsForAddressFamily.RemoveAt(0);
+                }
             }
         }
 
-        foreach (var (dnsRecordType, ipAddress) in ipAddressesByDnsRecordType)
+        foreach (var (dnsRecord, _) in dnsRecordsByType.Values.SelectMany(tuple => tuple).OrderBy(tuple => tuple.Order))
         {
-            _logger.LogInformation("Creating {dnsRecordType} record for {hostname} with {ipAddress}", AsString(dnsRecordType), hostName, ipAddress);
-            var ex = GetException(await client.Zones.DnsRecords.AddAsync(zone.Id, new NewDnsRecord { Name = hostName, Content = ipAddress.ToString(), Type = dnsRecordType },
-                cancellationToken));
+            _logger.LogInformation("Removing {dnsRecordType} record for {hostname}", AsString(dnsRecord.Type),
+                hostName);
+            var ex = GetException(
+                await client.Zones.DnsRecords.DeleteAsync(zone.Id, dnsRecord.Id, cancellationToken));
             if (ex is not null)
                 throw ex;
         }
@@ -200,6 +234,15 @@ public class Worker : BackgroundService
     private static Exception? GetException<T>(CloudFlareResult<T> result)
     {
         return result.Success ? null : new Exception(result.Errors[0].Message);
+    }
+
+    private static T ThrowIfError<T>(CloudFlareResult<T> result)
+    {
+        var ex = GetException(result);
+        if (ex is not null)
+            throw ex;
+
+        return result.Result;
     }
 
     private static string AsString(AddressFamily addressFamily) => addressFamily switch
