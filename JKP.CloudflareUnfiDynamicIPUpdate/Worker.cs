@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -133,10 +134,11 @@ public partial class Worker : BackgroundService
     [GeneratedRegex(@"^[ \t]*(?:(?:#|$)|(?<idName>((?<hex>0x)(?<id>[0-9A-Fa-f])|(?<id>\d+)\s+(?<name>\S+)(?:$|\s+#))))")]
     private static partial Regex IdNameRegex();
 
-    private async Task<Dictionary<int, string>?> GetScopeTable(CancellationToken cancellationToken = default)
+    private async Task<IReadOnlyDictionary<int, string>?> GetScopeTable(CancellationToken cancellationToken = default)
     {
         using var client = new SftpClient(_dynamicUpdateConfig.Ssh.Host, 22, _dynamicUpdateConfig.Ssh.UserName, _dynamicUpdateConfig.Ssh.Password);
 
+        _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
         await client.ConnectAsync(cancellationToken);
 
         var table = new Dictionary<int, string>();
@@ -150,11 +152,13 @@ public partial class Worker : BackgroundService
             path = paths[pIndex];
             try
             {
+                _logger.LogInformation("Opening {path}", path);
                 input = await client.OpenAsync(path, FileMode.Open, FileAccess.Read, cancellationToken);
                 break;
             }
             catch (SshConnectionException)
             {
+                _logger.LogError("Problem with opening {path}", path);
                 if (input is not null)
                     await input.DisposeAsync();
                 input = null;
@@ -178,12 +182,19 @@ public partial class Worker : BackgroundService
                     m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
 
                 if (id is >= 0 and <= 256 /* Error should be size - 1 where size is 256 */)
+                {
                     table[id] = m.Groups["name"].Value;
+                    _logger.LogInformation("Added scope name {name} for {id}", table[id], id);
+                }
+                else
+                {
+                    _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 256", id);
+                }
             }
             line = await reader.ReadLineAsync(cancellationToken);
         }
 
-        return table;
+        return table.ToFrozenDictionary();
     }
 
     private async Task<Zone?> GetZone(string hostName, CancellationToken cancellationToken = default)

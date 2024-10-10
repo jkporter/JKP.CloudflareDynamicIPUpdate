@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using System.Collections.ObjectModel;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using JsonException = Newtonsoft.Json.JsonException;
 
@@ -6,7 +7,7 @@ namespace JKP.CloudflareDynamicIPUpdate.Serialization
 {
     internal class ScopeConvertor : JsonConverter<Scope>
     {
-        public Dictionary<int, string> Scopes { get; set; } = new();
+        public IReadOnlyDictionary<int, string> Scopes { get; set; } = ReadOnlyDictionary<int, string>.Empty;
 
         public override Scope Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
