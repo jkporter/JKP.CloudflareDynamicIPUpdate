@@ -9,7 +9,7 @@ public class AddressInformation
     public IPAddress Local { get; set; }
     [JsonPropertyName("prefixlen")]
     public int PrefixLength { get; set; }
-    public string Scope { get; set; }
+    public Scope Scope { get; set; }
     public bool Dynamic { get; set; }
     public string Label { get; set; }
     [JsonConverter(typeof(TimeSpanConvertor))]

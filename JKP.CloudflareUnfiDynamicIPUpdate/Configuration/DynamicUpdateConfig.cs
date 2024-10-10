@@ -14,6 +14,8 @@ namespace JKP.CloudflareDynamicIPUpdate.Configuration
 
         public bool UpdateIPv6 { get; set;} = true;
 
+        public ICollection<object> Scopes { get; set; } = ["global"];
+
         public int CheckInterval { get; set; } = 300;
 
         public SshConfig Ssh { get; set; }
