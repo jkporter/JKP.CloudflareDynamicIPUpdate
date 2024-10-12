@@ -1,8 +1,10 @@
 using System.Collections.Frozen;
+using System.Drawing;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Serialization;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CloudFlare.Client;
@@ -12,6 +14,7 @@ using CloudFlare.Client.Api.Zones.DnsRecord;
 using CloudFlare.Client.Enumerators;
 using JKP.CloudflareDynamicIPUpdate.Configuration;
 using JKP.CloudflareDynamicIPUpdate.Serialization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Renci.SshNet;
 using Renci.SshNet.Common;
@@ -40,7 +43,7 @@ public partial class Worker : BackgroundService
     public Worker(IOptions<DynamicUpdateConfig> dynamicUpdateConfig, ILogger<Worker> logger)
     {
         _dynamicUpdateConfig = dynamicUpdateConfig.Value;
-        _period = TimeSpan.FromSeconds(_dynamicUpdateConfig.CheckInterval);
+        _period = TimeSpan.FromSeconds(dynamicUpdateConfig.Value.CheckInterval);
         _logger = logger;
     }
 
@@ -56,29 +59,46 @@ public partial class Worker : BackgroundService
                 var address = await GetAddress(stoppingToken);
                 if (address is not null)
                 {
-                    var ipAddresses = new HashSet<IPAddress>(IPAddressEqualityComparer);
-                    foreach (var ipAddress in GetIPAddresses(address.AddressInformation))
-                    {
-                        if ((ipAddress.AddressFamily is AddressFamily.InterNetwork &&
-                             !_dynamicUpdateConfig.UpdateIPv4) ||
-                            (ipAddress.AddressFamily is AddressFamily.InterNetworkV6 &&
-                             !_dynamicUpdateConfig.UpdateIPv6))
-                            continue;
+                    var logIPAddressesMessage = new StringBuilder("Found {ipAddressCount} address(es):");
+                    var logIPAddressesArgs = new List<object>();
+                    var ipAddresses = new HashSet<IPAddress>(GetIPAddresses(address.AddressInformation)
+                        .Where(ipAddress =>
+                        {
+                            if (ipAddress.AddressFamily is not AddressFamily.InterNetwork |
+                                !_dynamicUpdateConfig.UpdateIPv4 &&
+                                ipAddress.AddressFamily is not AddressFamily.InterNetworkV6 |
+                                !_dynamicUpdateConfig.UpdateIPv6) return false;
 
-                        _logger.LogInformation("Found {ipAddressFamily} address: {ipAddress}",
-                            AsString(ipAddress.AddressFamily), ipAddress);
-                        if (!currentAddresses.Contains(ipAddress))
-                            ipAddresses.Add(ipAddress);
-                    }
+                            logIPAddressesMessage.Append($"{Environment.NewLine}  {{ipAddressFamily}} address: {{ipAddress}}");
 
-                    if (ipAddresses.Count > 0)
+                            logIPAddressesArgs.Add(AsString(ipAddress.AddressFamily));
+                            logIPAddressesArgs.Add(ipAddress);
+
+                            return true;
+                        }), IPAddressEqualityComparer);
+
+                    if (ipAddresses.Count == 0)
                     {
-                        await UpdateDnsRecords(_dynamicUpdateConfig.Domain, ipAddresses, cancellationToken: stoppingToken);
-                        currentAddresses = new HashSet<IPAddress>(ipAddresses, IPAddressEqualityComparer);
+                        _logger.LogInformation("No IP addresses found.");
+                        currentAddresses.Clear();
                     }
                     else
                     {
-                        _logger.LogInformation("No DNS records to update.");
+                        logIPAddressesArgs.Insert(0, ipAddresses.Count);
+                        _logger.LogInformation(logIPAddressesMessage.ToString(), logIPAddressesArgs.ToArray());
+
+                        currentAddresses.IntersectWith(ipAddresses);
+                        ipAddresses.ExceptWith(currentAddresses);
+
+                        if (ipAddresses.Count > 0)
+                        {
+                            await UpdateDnsRecords(_dynamicUpdateConfig.Domain, ipAddresses, cancellationToken: stoppingToken);
+                            currentAddresses.UnionWith(ipAddresses);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("No DNS records to update.");
+                        }
                     }
                 }
                 else
@@ -100,7 +120,7 @@ public partial class Worker : BackgroundService
     private async Task<AddressObject?> GetAddress(CancellationToken cancellationToken = default)
     {
         using var connectionInfo = new KeyboardInteractiveConnectionInfo(_dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
-        connectionInfo.AuthenticationPrompt += (sender, args) =>
+        connectionInfo.AuthenticationPrompt += (_, args) =>
         {
             foreach (var authenticationPrompt in args.Prompts)
                 authenticationPrompt.Response = _dynamicUpdateConfig.Ssh.Password;
@@ -134,6 +154,8 @@ public partial class Worker : BackgroundService
     [GeneratedRegex(@"^[ \t]*(?:(?:#|$)|(?<idName>((?<hex>0x)(?<id>[0-9A-Fa-f])|(?<id>\d+)\s+(?<name>\S+)(?:$|\s+#))))")]
     private static partial Regex IdNameRegex();
 
+    static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
+    
     private async Task<IReadOnlyDictionary<int, string>?> GetScopeTable(CancellationToken cancellationToken = default)
     {
         using var client = new SftpClient(_dynamicUpdateConfig.Ssh.Host, 22, _dynamicUpdateConfig.Ssh.UserName, _dynamicUpdateConfig.Ssh.Password);
@@ -144,21 +166,20 @@ public partial class Worker : BackgroundService
         var table = new Dictionary<int, string>();
 
         SftpFileStream? input = null;
-        var paths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
-
+        
         string? path = null;
-        for (var pIndex = 0; pIndex < paths.Length; pIndex++)
+        foreach (var rtScopesPath in RtScopesPaths)
         {
-            path = paths[pIndex];
             try
             {
-                _logger.LogInformation("Opening {path}", path);
-                input = await client.OpenAsync(path, FileMode.Open, FileAccess.Read, cancellationToken);
+                _logger.LogInformation("Opening {path}", rtScopesPath);
+                input = await client.OpenAsync(rtScopesPath, FileMode.Open, FileAccess.Read, cancellationToken);
+                path = rtScopesPath;
                 break;
             }
             catch (SshConnectionException)
             {
-                _logger.LogError("Problem with opening {path}", path);
+                _logger.LogError("Problem with opening {path}", rtScopesPath);
                 if (input is not null)
                     await input.DisposeAsync();
                 input = null;
@@ -181,14 +202,16 @@ public partial class Worker : BackgroundService
                 var id = int.Parse(m.Groups["id"].ValueSpan,
                     m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
 
-                if (id is >= 0 and <= 256 /* Error should be size - 1 where size is 256 */)
+                const int size = 256;
+                if (id is >= 0 and <= size -1 /* Deviates from source code (<= size) as a value of 256 will overflow
+                                               * the defined array in source. */)
                 {
                     table[id] = m.Groups["name"].Value;
                     _logger.LogInformation("Added scope name {name} for {id}", table[id], id);
                 }
                 else
                 {
-                    _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 256", id);
+                    _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 255", id);
                 }
             }
             line = await reader.ReadLineAsync(cancellationToken);
@@ -207,7 +230,8 @@ public partial class Worker : BackgroundService
         _logger.LogInformation("Searching for zone encompassing {hostName}", hostName);
 
         _zones = (await client.Zones.GetAsync(cancellationToken: cancellationToken)).Result;
-        zone = _zones.SingleOrDefault(zone => hostName.EndsWith(zone.Name, StringComparison.InvariantCultureIgnoreCase));
+        zone = _zones.Where(zone => hostName.EndsWith(zone.Name, StringComparison.InvariantCultureIgnoreCase))
+            .OrderByDescending(zone => zone.Name.Length).FirstOrDefault();
 
         return zone;
     }
@@ -218,8 +242,8 @@ public partial class Worker : BackgroundService
             .Where(addressInfo => addressInfo.Scope is Scope.Universe)
             .Select(addressInfo => addressInfo.Local)
             .Where(ipAddress =>
-                ipAddress.AddressFamily is AddressFamily.InterNetwork && _dynamicUpdateConfig.UpdateIPv4 ||
-                ipAddress.AddressFamily is AddressFamily.InterNetworkV6 && _dynamicUpdateConfig.UpdateIPv6);
+                ipAddress.AddressFamily is AddressFamily.InterNetwork & _dynamicUpdateConfig.UpdateIPv4 ||
+                ipAddress.AddressFamily is AddressFamily.InterNetworkV6 & _dynamicUpdateConfig.UpdateIPv6);
     }
 
     private async Task UpdateDnsRecords(string hostName, IEnumerable<IPAddress> ipAddresses,
@@ -237,8 +261,8 @@ public partial class Worker : BackgroundService
         using var client = new CloudFlareClient(_dynamicUpdateConfig.Cloudflare.ApiToken);
         var dnsRecordsByType = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName },
                 cancellationToken: cancellationToken)).Result
-            .Where(dnsRecord => dnsRecord.Type is DnsRecordType.A && _dynamicUpdateConfig.UpdateIPv4 ||
-                                dnsRecord.Type is DnsRecordType.Aaaa && _dynamicUpdateConfig.UpdateIPv6)
+            .Where(dnsRecord => dnsRecord.Type is DnsRecordType.A & _dynamicUpdateConfig.UpdateIPv4 ||
+                                dnsRecord.Type is DnsRecordType.Aaaa & _dynamicUpdateConfig.UpdateIPv6)
             .Select((dnsRecord, index) => (DnsRecord: dnsRecord, Order: index + 1))
             .GroupBy(tuple => tuple.DnsRecord.Type)
             .ToDictionary(dnsRecord => dnsRecord.Key, dnsRecord => dnsRecord.ToList());
