@@ -1,5 +1,4 @@
 using System.Collections.Frozen;
-using System.Drawing;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -13,8 +12,8 @@ using CloudFlare.Client.Api.Zones;
 using CloudFlare.Client.Api.Zones.DnsRecord;
 using CloudFlare.Client.Enumerators;
 using JKP.CloudflareDynamicIPUpdate.Configuration;
+using JKP.CloudflareDynamicIPUpdate.Notification;
 using JKP.CloudflareDynamicIPUpdate.Serialization;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Renci.SshNet;
 using Renci.SshNet.Common;
@@ -36,14 +35,16 @@ public partial class Worker : BackgroundService
     };
 
     private readonly DynamicUpdateConfig _dynamicUpdateConfig;
+    private readonly IEnumerable<INotifier> _notifiers;
     private readonly ILogger<Worker> _logger;
 
     private readonly TimeSpan _period;
 
-    public Worker(IOptions<DynamicUpdateConfig> dynamicUpdateConfig, ILogger<Worker> logger)
+    public Worker(IOptions<DynamicUpdateConfig> dynamicUpdateConfig, IEnumerable<INotifier> notifiers, ILogger<Worker> logger)
     {
         _dynamicUpdateConfig = dynamicUpdateConfig.Value;
         _period = TimeSpan.FromSeconds(dynamicUpdateConfig.Value.CheckInterval);
+        _notifiers = notifiers;
         _logger = logger;
     }
 
@@ -140,10 +141,11 @@ public partial class Worker : BackgroundService
         var scopeConvertor = new ScopeConvertor();
         try
         {
-            scopeConvertor.Scopes = await GetScopeTable(cancellationToken) ?? new Dictionary<int, string>();
+            scopeConvertor.Scopes = await GetScopeTable(connectionInfo, cancellationToken) ?? new Dictionary<int, string>();
         }
-        catch
+        catch (Exception e)
         {
+            _logger.LogError(e, "Failed to get scope table.");
         }
 
         var options = new JsonSerializerOptions(JsonSerializerOptions);
@@ -155,10 +157,10 @@ public partial class Worker : BackgroundService
     private static partial Regex IdNameRegex();
 
     static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
-    
-    private async Task<IReadOnlyDictionary<int, string>?> GetScopeTable(CancellationToken cancellationToken = default)
+
+    private async Task<IReadOnlyDictionary<int, string>?> GetScopeTable(ConnectionInfo connectionInfo, CancellationToken cancellationToken = default)
     {
-        using var client = new SftpClient(_dynamicUpdateConfig.Ssh.Host, 22, _dynamicUpdateConfig.Ssh.UserName, _dynamicUpdateConfig.Ssh.Password);
+        using var client = new SftpClient(connectionInfo);
 
         _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
         await client.ConnectAsync(cancellationToken);
@@ -166,7 +168,7 @@ public partial class Worker : BackgroundService
         var table = new Dictionary<int, string>();
 
         SftpFileStream? input = null;
-        
+
         string? path = null;
         foreach (var rtScopesPath in RtScopesPaths)
         {
@@ -179,7 +181,7 @@ public partial class Worker : BackgroundService
             }
             catch (SshConnectionException)
             {
-                _logger.LogError("Problem with opening {path}", rtScopesPath);
+                _logger.LogWarning("Could not open {path}", rtScopesPath);
                 if (input is not null)
                     await input.DisposeAsync();
                 input = null;
@@ -203,7 +205,7 @@ public partial class Worker : BackgroundService
                     m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
 
                 const int size = 256;
-                if (id is >= 0 and <= size -1 /* Deviates from source code (<= size) as a value of 256 will overflow
+                if (id is >= 0 and <= size - 1 /* Deviates from source code (<= size) as a value of 256 will overflow
                                                * the defined array in source. */)
                 {
                     table[id] = m.Groups["name"].Value;
@@ -336,6 +338,8 @@ public partial class Worker : BackgroundService
                 dnsRecord.Id, ipAddresses, hostName);
             _ = ThrowIfError(await client.Zones.DnsRecords.DeleteAsync(zone.Id, dnsRecord.Id, cancellationToken));
         }
+
+        await Task.WhenAll(_notifiers.Select(notifier => notifier.SendNotification(cancellationToken)));
     }
 
     private static T ThrowIfError<T>(CloudFlareResult<T> result)
