@@ -138,16 +138,10 @@ public partial class Worker : BackgroundService
         if (cmd.ExitStatus.GetValueOrDefault() != 0)
             throw new Exception(cmd.Error);
 
-        var scopeConvertor = new ScopeConvertor();
-        try
+        var scopeConvertor = new ScopeConvertor
         {
-            scopeConvertor.Scopes = await GetScopeTable(connectionInfo, cancellationToken) ?? new Dictionary<int, string>();
-        }
-        catch (Exception e)
-        {
-            _logger.LogError(e, "Failed to get scope table.");
-        }
-
+            Scopes = await GetScopeTable(connectionInfo, cancellationToken)
+        };
         var options = new JsonSerializerOptions(JsonSerializerOptions);
         options.Converters.Add(scopeConvertor);
         return JsonSerializer.Deserialize<AddressObject[]>(cmd.Result, options)![0];
@@ -158,68 +152,84 @@ public partial class Worker : BackgroundService
 
     static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
 
-    private async Task<IReadOnlyDictionary<int, string>?> GetScopeTable(ConnectionInfo connectionInfo, CancellationToken cancellationToken = default)
+    static IReadOnlyDictionary<Scope, string> RtScopeTable = new Dictionary<Scope, string>
     {
-        using var client = new SftpClient(connectionInfo);
+        { Scope.Universe, "global" },
+        { Scope.Nowhere, "nowhere" },
+        { Scope.Host, "host" },
+        { Scope.Link, "link" },
+        { Scope.Site, "site" }
+    }.ToFrozenDictionary();
 
-        _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
-        await client.ConnectAsync(cancellationToken);
-
-        var table = new Dictionary<int, string>();
-
-        SftpFileStream? input = null;
-
-        string? path = null;
-        foreach (var rtScopesPath in RtScopesPaths)
+    private async Task<IReadOnlyDictionary<Scope, string>> GetScopeTable(ConnectionInfo connectionInfo, CancellationToken cancellationToken = default)
+    {
+        var table = new Dictionary<Scope, string>(RtScopeTable);
+        try
         {
-            try
+            using var client = new SftpClient(connectionInfo);
+
+            _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
+            await client.ConnectAsync(cancellationToken);
+
+            SftpFileStream? input = null;
+
+            string? path = null;
+            foreach (var rtScopesPath in RtScopesPaths)
             {
-                _logger.LogInformation("Opening {path}", rtScopesPath);
-                input = await client.OpenAsync(rtScopesPath, FileMode.Open, FileAccess.Read, cancellationToken);
-                path = rtScopesPath;
-                break;
-            }
-            catch (SshConnectionException)
-            {
-                _logger.LogWarning("Could not open {path}", rtScopesPath);
-                if (input is not null)
-                    await input.DisposeAsync();
-                input = null;
-            }
-        }
-
-        if (input == null)
-            return null;
-
-        using var reader = new StreamReader(input);
-        var line = await reader.ReadLineAsync(cancellationToken);
-        while (line is not null)
-        {
-            var m = IdNameRegex().Match(line);
-            if (!m.Success)
-                throw new Exception($"Database {path} is corrupted at {line}");
-
-            if (m.Groups["idName"].Success)
-            {
-                var id = int.Parse(m.Groups["id"].ValueSpan,
-                    m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
-
-                const int size = 256;
-                if (id is >= 0 and <= size - 1 /* Deviates from source code (<= size) as a value of 256 will overflow
-                                               * the defined array in source. */)
+                try
                 {
-                    table[id] = m.Groups["name"].Value;
-                    _logger.LogInformation("Added scope name {name} for {id}", table[id], id);
+                    _logger.LogInformation("Opening {path}", rtScopesPath);
+                    input = await client.OpenAsync(rtScopesPath, FileMode.Open, FileAccess.Read, cancellationToken);
+                    path = rtScopesPath;
+                    break;
                 }
-                else
+                catch (SshConnectionException)
                 {
-                    _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 255", id);
+                    _logger.LogWarning("Could not open {path}", rtScopesPath);
+                    if (input is not null)
+                        await input.DisposeAsync();
+                    input = null;
                 }
             }
-            line = await reader.ReadLineAsync(cancellationToken);
-        }
 
-        return table.ToFrozenDictionary();
+            if (input == null)
+                return table.ToFrozenDictionary();
+
+            using var reader = new StreamReader(input);
+            var line = await reader.ReadLineAsync(cancellationToken);
+            while (line is not null)
+            {
+                var m = IdNameRegex().Match(line);
+                if (!m.Success)
+                    throw new Exception($"Database {path} is corrupted at {line}");
+
+                if (m.Groups["idName"].Success)
+                {
+                    var id = int.Parse(m.Groups["id"].ValueSpan,
+                        m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
+
+                    const int size = 256;
+                    if (id is >= 0 and <= size - 1 /* Deviates from source code (<= size) as a value of 256 will overflow
+                                                    * the defined array in source. */)
+                    {
+                        var scope = (Scope)id;
+                        table[scope] = m.Groups["name"].Value;
+                        _logger.LogInformation("Added scope name {name} for {id}", table[scope], id);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 255", id);
+                    }
+                }
+                line = await reader.ReadLineAsync(cancellationToken);
+            }
+            return table.ToFrozenDictionary();
+        }
+        catch (Exception e)
+        {
+            _logger.LogError(e, "Failed to get scope table.");
+            return table.ToFrozenDictionary();
+        }
     }
 
     private async Task<Zone?> GetZone(string hostName, CancellationToken cancellationToken = default)

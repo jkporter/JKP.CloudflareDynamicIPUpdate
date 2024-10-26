@@ -7,7 +7,7 @@ namespace JKP.CloudflareDynamicIPUpdate.Serialization
 {
     internal class ScopeConvertor : JsonConverter<Scope>
     {
-        public IReadOnlyDictionary<int, string> Scopes { get; set; } = ReadOnlyDictionary<int, string>.Empty;
+        public IReadOnlyDictionary<Scope, string> Scopes { get; set; } = ReadOnlyDictionary<Scope, string>.Empty;
 
         public override Scope Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
         {
@@ -15,7 +15,7 @@ namespace JKP.CloudflareDynamicIPUpdate.Serialization
             {
                 case JsonTokenType.String:
                     var value = reader.GetString()!;
-                    return (Scope)Scopes.Single(kv => kv.Value == value).Key;
+                    return Scopes.Single(kv => kv.Value == value).Key;
                 case JsonTokenType.Number:
                     return (Scope)reader.GetInt32();
                 default:
