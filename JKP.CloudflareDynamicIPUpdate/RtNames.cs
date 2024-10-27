@@ -3,14 +3,11 @@ using System.Globalization;
 using System.Text.RegularExpressions;
 using JKP.CloudflareDynamicIPUpdate.Serialization;
 using Renci.SshNet;
-using Renci.SshNet.Sftp;
 
 namespace JKP.CloudflareDynamicIPUpdate;
 
 internal static partial class RtNames
 { 
-   static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
-
    public static IReadOnlyDictionary<Scope, string> RtScopeTable = new Dictionary<Scope, string>
     {
         { Scope.Universe, "global" },
@@ -20,7 +17,8 @@ internal static partial class RtNames
         { Scope.Site, "site" }
     }.ToFrozenDictionary();
 
-    public static async Task TabInitializeAsync(ISftpClient sftpClient, string path, IDictionary<Scope, string> table, int size, ILogger logger, CancellationToken cancellationToken)
+    public static async Task TabInitializeAsync(ISftpClient sftpClient, string path, IDictionary<Scope, string> table,
+        int size, ILogger logger, CancellationToken cancellationToken)
     {
         await using var input = await sftpClient.OpenAsync(path, FileMode.Open, FileAccess.Read, cancellationToken);
         using var reader = new StreamReader(input);
@@ -42,7 +40,7 @@ internal static partial class RtNames
         }
     }
 
-    [GeneratedRegex(@"^[ \t]*((#|$)|(0x\s*(\+|(?<idBase16Minus>-))?(0[xX])?(?<idBase16>[0-9A-Fa-f]+)|\s*(?<idBase10>[+-]?\d+))\s+(?<name>\S+)($|\s+#))", RegexOptions.ExplicitCapture | RegexOptions.Singleline)]
+    [GeneratedRegex(@"^[ \t]*((#|$)|(0x\s*(\+|(?<idBase16Minus>-))?(0[xX])?(?<idBase16Digits>[0-9A-Fa-f]+)|\s*(?<id>[+-]?\d+))\s+(?<name>\S+)($|\s+#))", RegexOptions.ExplicitCapture | RegexOptions.Singleline)]
     private static partial Regex IdNameRegex();
 
     private static async Task<(int Result, (int? Id, string Name)? IdName)> ReadIdNameAsync(StreamReader reader)
@@ -59,7 +57,7 @@ internal static partial class RtNames
 
             int id;
 
-            var idHexGroup = match.Groups["idBase16"];
+            var idHexGroup = match.Groups["idBase16Digits"];
             if (idHexGroup.Success)
             {
                 id = int.Parse(idHexGroup.ValueSpan, NumberStyles.AllowHexSpecifier);
@@ -68,7 +66,7 @@ internal static partial class RtNames
             }
             else
             {
-                id = int.Parse(match.Groups["idBase10"].ValueSpan, NumberStyles.AllowLeadingSign);
+                id = int.Parse(match.Groups["id"].ValueSpan, NumberStyles.AllowLeadingSign);
             }
 
             return (1, (id, nameGroup.Value));
