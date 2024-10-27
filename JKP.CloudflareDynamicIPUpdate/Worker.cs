@@ -147,89 +147,29 @@ public partial class Worker : BackgroundService
         return JsonSerializer.Deserialize<AddressObject[]>(cmd.Result, options)![0];
     }
 
-    [GeneratedRegex(@"^[ \t]*(?:(?:#|$)|(?<idName>((?<hex>0x)(?<id>[0-9A-Fa-f])|(?<id>\d+)\s+(?<name>\S+)(?:$|\s+#))))")]
-    private static partial Regex IdNameRegex();
-
     static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
-
-    static IReadOnlyDictionary<Scope, string> RtScopeTable = new Dictionary<Scope, string>
-    {
-        { Scope.Universe, "global" },
-        { Scope.Nowhere, "nowhere" },
-        { Scope.Host, "host" },
-        { Scope.Link, "link" },
-        { Scope.Site, "site" }
-    }.ToFrozenDictionary();
 
     private async Task<IReadOnlyDictionary<Scope, string>> GetScopeTable(ConnectionInfo connectionInfo, CancellationToken cancellationToken = default)
     {
-        var table = new Dictionary<Scope, string>(RtScopeTable);
-        try
+        var table = new Dictionary<Scope, string>(RtNames.RtScopeTable);
+        using var client = new SftpClient(connectionInfo);
+
+        _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
+        await client.ConnectAsync(cancellationToken);
+        foreach (var rtScopesPath in RtScopesPaths)
         {
-            using var client = new SftpClient(connectionInfo);
-
-            _logger.LogInformation("Connecting to {host} as {userName} via SFTP", _dynamicUpdateConfig.Ssh.Host, _dynamicUpdateConfig.Ssh.UserName);
-            await client.ConnectAsync(cancellationToken);
-
-            SftpFileStream? input = null;
-
-            string? path = null;
-            foreach (var rtScopesPath in RtScopesPaths)
+            _logger.LogInformation("Opening {path}", rtScopesPath);
+            try
             {
-                try
-                {
-                    _logger.LogInformation("Opening {path}", rtScopesPath);
-                    input = await client.OpenAsync(rtScopesPath, FileMode.Open, FileAccess.Read, cancellationToken);
-                    path = rtScopesPath;
-                    break;
-                }
-                catch (SshConnectionException)
-                {
-                    _logger.LogWarning("Could not open {path}", rtScopesPath);
-                    if (input is not null)
-                        await input.DisposeAsync();
-                    input = null;
-                }
+                await RtNames.TabInitializeAsync(client, rtScopesPath, table, 256, _logger, cancellationToken);
+                break;
             }
-
-            if (input == null)
-                return table.ToFrozenDictionary();
-
-            using var reader = new StreamReader(input);
-            var line = await reader.ReadLineAsync(cancellationToken);
-            while (line is not null)
+            catch
             {
-                var m = IdNameRegex().Match(line);
-                if (!m.Success)
-                    throw new Exception($"Database {path} is corrupted at {line}");
-
-                if (m.Groups["idName"].Success)
-                {
-                    var id = int.Parse(m.Groups["id"].ValueSpan,
-                        m.Groups["hex"].Success ? NumberStyles.AllowHexSpecifier : NumberStyles.None);
-
-                    const int size = 256;
-                    if (id is >= 0 and <= size - 1 /* Deviates from source code (<= size) as a value of 256 will overflow
-                                                    * the defined array in source. */)
-                    {
-                        var scope = (Scope)id;
-                        table[scope] = m.Groups["name"].Value;
-                        _logger.LogInformation("Added scope name {name} for {id}", table[scope], id);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Scope {id} is outside range. Must be between 0 and 255", id);
-                    }
-                }
-                line = await reader.ReadLineAsync(cancellationToken);
             }
-            return table.ToFrozenDictionary();
         }
-        catch (Exception e)
-        {
-            _logger.LogError(e, "Failed to get scope table.");
-            return table.ToFrozenDictionary();
-        }
+
+        return table.ToFrozenDictionary();
     }
 
     private async Task<Zone?> GetZone(string hostName, CancellationToken cancellationToken = default)
