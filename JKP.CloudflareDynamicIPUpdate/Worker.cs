@@ -161,7 +161,7 @@ public partial class Worker : BackgroundService
             _logger.LogInformation("Opening {path}", rtScopesPath);
             try
             {
-                await RtNames.TabInitializeAsync(client, rtScopesPath, table, 256, _logger, cancellationToken);
+                await RtNames.TableInitializeAsync(client, rtScopesPath, table, 256, _logger, cancellationToken);
                 break;
             }
             catch

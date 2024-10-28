@@ -17,13 +17,13 @@ internal static partial class RtNames
         { Scope.Site, "site" }
     }.ToFrozenDictionary();
 
-    public static async Task TabInitializeAsync(ISftpClient sftpClient, string path, IDictionary<Scope, string> table,
+    public static async Task TableInitializeAsync(ISftpClient sftpClient, string path, IDictionary<Scope, string> table,
         int size, ILogger logger, CancellationToken cancellationToken)
     {
         await using var input = await sftpClient.OpenAsync(path, FileMode.Open, FileAccess.Read, cancellationToken);
         using var reader = new StreamReader(input);
         (int Result, (int? Id, string Name)? IdName) ret;
-        while ((ret = (await ReadIdNameAsync(reader))).Result != 0)
+        while ((ret = await ReadIdNameAsync(reader)).Result != 0)
         {
             if (ret.Result == -1)
             {
@@ -40,7 +40,7 @@ internal static partial class RtNames
         }
     }
 
-    [GeneratedRegex(@"^[ \t]*((#|$)|(0x\s*(\+|(?<idBase16Minus>-))?(0[xX])?(?<idBase16Digits>[0-9A-Fa-f]+)|\s*(?<id>[+-]?\d+))\s+(?<name>\S+)($|\s+#))", RegexOptions.ExplicitCapture | RegexOptions.Singleline)]
+    [GeneratedRegex(@"^[ \t]*((#|$)|(0x\s*(\+|(?<idBase16MinusSign>-))?(0[xX])?(?<idBase16Digits>[0-9A-Fa-f]+)|\s*(?<id>[+-]?\d+))\s+\s*(?<name>\S+)($|\s+#))", RegexOptions.ExplicitCapture | RegexOptions.Singleline)]
     private static partial Regex IdNameRegex();
 
     private static async Task<(int Result, (int? Id, string Name)? IdName)> ReadIdNameAsync(StreamReader reader)
@@ -61,7 +61,7 @@ internal static partial class RtNames
             if (idHexGroup.Success)
             {
                 id = int.Parse(idHexGroup.ValueSpan, NumberStyles.AllowHexSpecifier);
-                if (match.Groups["idBase16Minus"].Success)
+                if (match.Groups["idBase16MinusSign"].Success)
                     id = -id;
             }
             else
