@@ -1,11 +1,9 @@
 using System.Collections.Frozen;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using CloudFlare.Client;
 using CloudFlare.Client.Api.Result;
 using CloudFlare.Client.Api.Zones;
@@ -16,8 +14,6 @@ using JKP.CloudflareDynamicIPUpdate.Notification;
 using JKP.CloudflareDynamicIPUpdate.Serialization;
 using Microsoft.Extensions.Options;
 using Renci.SshNet;
-using Renci.SshNet.Common;
-using Renci.SshNet.Sftp;
 
 namespace JKP.CloudflareDynamicIPUpdate;
 
