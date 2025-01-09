@@ -1,0 +1,31 @@
+﻿<!DOCTYPE html>
+<title>IP Address Changes for {{domain}}</title>
+
+<h1>IP Address Changes for {{domain}}</h1>
+{{#if added}}
+<h2>Added</h2>
+<dl>
+	<dt>A</dt>
+	<dd>192.168.0.1</dd>
+	<dt>AAAA</dt>
+	<dd>2001:db8:3333:4444:5555:6666:7777:8888</dd>
+</dl>
+{{/if}}
+{{#if updated}}
+<h2>Updated</h2>
+<dl>
+	<dt>A</dt>
+	<dd>from 192.168.0.1 to <b>192.168.0.1</b></dd>
+	<dt>AAAA</dt>
+	<dd>2001:db8:3333:4444:5555:6666:7777:8888</dd>
+</dl>
+{{/if}}
+{{#if deleted}}
+<h2>Removed</h2>
+<dl>
+	<dt>A</dt>
+	<dd>192.168.0.1</dd>
+	<dt>AAAA</dt>
+	<dd>2001:db8:3333:4444:5555:6666:7777:8888</dd>
+</dl>
+{{/if}}

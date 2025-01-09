@@ -32,7 +32,7 @@ internal static partial class RtNames
                 throw ex;
             }
 
-            var (id, name) = ret.Item2!.Value;
+            var (id, name) = ret.IdName!.Value;
             if (id < 0 || id >= size)
                 continue;
 

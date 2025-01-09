@@ -143,7 +143,7 @@ public partial class Worker : BackgroundService
         return JsonSerializer.Deserialize<AddressObject[]>(cmd.Result, options)![0];
     }
 
-    static readonly string[] RtScopesPaths = new[] { "/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes" };
+    private static readonly string[] RtScopesPaths = ["/etc/iproute2/rt_scopes", "/usr/lib/iproute2/rt_scopes"];
 
     private async Task<IReadOnlyDictionary<Scope, string>> GetScopeTable(ConnectionInfo connectionInfo, CancellationToken cancellationToken = default)
     {

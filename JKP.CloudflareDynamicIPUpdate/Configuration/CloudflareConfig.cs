@@ -1,7 +1,6 @@
-﻿namespace JKP.CloudflareDynamicIPUpdate.Configuration
+﻿namespace JKP.CloudflareDynamicIPUpdate.Configuration;
+
+public class CloudflareConfig
 {
-    public class CloudflareConfig
-    {
-        public string ApiToken { get; set; }
-    }
+    public string ApiToken { get; set; }
 }
