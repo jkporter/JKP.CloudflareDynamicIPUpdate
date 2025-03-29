@@ -266,7 +266,7 @@ public partial class Worker : BackgroundService
     }
 
     static IEnumerable<(DnsRecord DnsRecord, IPAddress? IPAddress)> GetDnsRecordsWithMatchingIPAddress(
-        IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out List<IPAddress> toAdd)
+        IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out IList<IPAddress> toAdd)
     {
         var dnsRecordsAndMatchingIPAddress = new List<(DnsRecord DnsRecord, IPAddress? IPAddress)>();
         var ipAddressList = ipAddresses.ToList();
@@ -278,12 +278,11 @@ public partial class Worker : BackgroundService
             if (ipAddressIndex == -1)
             {
                 dnsRecordsAndMatchingIPAddress.Add((dnsRecord, null));
+                continue;
             }
-            else
-            {
-                dnsRecordsAndMatchingIPAddress.Add((dnsRecord, ipAddressList[ipAddressIndex]));
-                ipAddressList.RemoveAt(ipAddressIndex);
-            }
+
+            dnsRecordsAndMatchingIPAddress.Add((dnsRecord, ipAddressList[ipAddressIndex]));
+            ipAddressList.RemoveAt(ipAddressIndex);
         }
 
         toAdd = ipAddressList;
