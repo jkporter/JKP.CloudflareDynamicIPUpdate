@@ -3,7 +3,6 @@ using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using CloudFlare.Client;
 using CloudFlare.Client.Api.Result;
 using CloudFlare.Client.Api.Zones;
@@ -266,7 +265,8 @@ public partial class Worker : BackgroundService
         await Task.WhenAll(_notifiers.Select(notifier => notifier.SendNotification(cancellationToken)));
     }
 
-    static IEnumerable<(DnsRecord DnsRecord, IPAddress? IPAddress)> GetDnsRecordsWithMatchingIPAddress(IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out List<IPAddress> toAdd)
+    static IEnumerable<(DnsRecord DnsRecord, IPAddress? IPAddress)> GetDnsRecordsWithMatchingIPAddress(
+        IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out List<IPAddress> toAdd)
     {
         var dnsRecordsAndMatchingIPAddress = new List<(DnsRecord DnsRecord, IPAddress? IPAddress)>();
         var ipAddressList = ipAddresses.ToList();
