@@ -207,29 +207,30 @@ public partial class Worker : BackgroundService
         var dnsRecords = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName }, cancellationToken: cancellationToken)).Result.ToList();
 
         List<IPAddress> ipAddressesForAddOrUpdate;
-        foreach (var (dnsRecord, ipAddress) in GetDnsRecordsWithMatchingIPAddress(dnsRecords, ipAddresses, out ipAddressesForAddOrUpdate))
+        foreach (var (dnsRecord, matchingIPAddress) in GetDnsRecordsWithMatchingIPAddress(dnsRecords, ipAddresses, out ipAddressesForAddOrUpdate))
         {
-            if (ipAddress is not null)
+            if (matchingIPAddress is not null)
             {
                 _logger.LogInformation("The {dnsRecordType} record {id} for {ipAddress} does not require updating.",
-                    AsString(dnsRecord.Type), dnsRecord.Id, ipAddress);
+                    AsString(dnsRecord.Type), dnsRecord.Id, matchingIPAddress);
                 continue;
             }
 
             var ipAddressesForAddOrUpdateIndex = ipAddressesForAddOrUpdate.FindIndex(ipAddress => GetDnsRecordType(ipAddress) == dnsRecord.Type);
             if (ipAddressesForAddOrUpdateIndex != -1)
             {
+                var ipAddressForUpdate = ipAddressesForAddOrUpdate[ipAddressesForAddOrUpdateIndex];
                 _logger.LogInformation(
                     "Updating {dnsRecordType} record {id} for {hostname} with from {previousIPAddress} to {ipAddress}",
                     AsString(dnsRecord.Type),
                     dnsRecord.Id,
                     hostName,
-                    dnsRecord.Content, ipAddress);
+                    dnsRecord.Content, ipAddressForUpdate);
                 _ = ThrowIfError(await client.Zones.DnsRecords.UpdateAsync(zone.Id,
                     dnsRecord.Id,
                     new ModifiedDnsRecord
                     {
-                        Content = ipAddress.ToString(),
+                        Content = ipAddressForUpdate.ToString(),
                         Name = dnsRecord.Name,
                         Type = dnsRecord.Type
                     },
@@ -244,14 +245,14 @@ public partial class Worker : BackgroundService
             _ = ThrowIfError(await client.Zones.DnsRecords.DeleteAsync(zone.Id, dnsRecord.Id, cancellationToken));
         }
 
-        foreach (var ipAddress in ipAddressesForAddOrUpdate)
+        foreach (var ipAddressForAdd in ipAddressesForAddOrUpdate)
         {
-            var dnsRecordType = GetDnsRecordType(ipAddress)!.Value;
+            var dnsRecordType = GetDnsRecordType(ipAddressForAdd)!.Value;
             _logger.LogInformation("Creating {dnsRecordType} record for {hostname} with {ipAddress}",
-                AsString(dnsRecordType), hostName, ipAddress);
+                AsString(dnsRecordType), hostName, ipAddressForAdd);
             _ = ThrowIfError(await client.Zones.DnsRecords.AddAsync(zone.Id,
                 new NewDnsRecord
-                    { Name = hostName, Content = ipAddress.ToString(), Type = dnsRecordType },
+                    { Name = hostName, Content = ipAddressForAdd.ToString(), Type = dnsRecordType },
                 cancellationToken));
         }
 
