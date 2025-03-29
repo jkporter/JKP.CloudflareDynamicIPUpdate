@@ -266,7 +266,7 @@ public partial class Worker : BackgroundService
     }
 
     static IEnumerable<(DnsRecord DnsRecord, IPAddress? IPAddress)> GetDnsRecordsWithMatchingIPAddress(
-        IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out IList<IPAddress> toAdd)
+        IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out List<IPAddress> toAdd)
     {
         var dnsRecordsAndMatchingIPAddress = new List<(DnsRecord DnsRecord, IPAddress? IPAddress)>();
         var ipAddressList = ipAddresses.ToList();
