@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CloudFlare.Client;
 using CloudFlare.Client.Api.Result;
 using CloudFlare.Client.Api.Zones;
@@ -226,13 +227,16 @@ public partial class Worker : BackgroundService
                     dnsRecord.Id,
                     hostName,
                     dnsRecord.Content, ipAddressForUpdate);
+
                 _ = ThrowIfError(await client.Zones.DnsRecords.UpdateAsync(zone.Id,
                     dnsRecord.Id,
                     new ModifiedDnsRecord
                     {
                         Content = ipAddressForUpdate.ToString(),
                         Name = dnsRecord.Name,
-                        Type = dnsRecord.Type
+                        Type = dnsRecord.Type,
+                        Comment =
+                            $"Updated on {DateTimeOffset.Now:O} from {dnsRecord.Content}{(dnsRecord.ModifiedDate is null ? string.Empty : $" on {dnsRecord.ModifiedDate.Value:O}")}"
                     },
                     cancellationToken));
                 ipAddressesForAddOrUpdate.RemoveAt(ipAddressesForAddOrUpdateIndex);
@@ -252,7 +256,10 @@ public partial class Worker : BackgroundService
                 AsString(dnsRecordType), hostName, ipAddressForAdd);
             _ = ThrowIfError(await client.Zones.DnsRecords.AddAsync(zone.Id,
                 new NewDnsRecord
-                    { Name = hostName, Content = ipAddressForAdd.ToString(), Type = dnsRecordType },
+                {
+                    Name = hostName, Content = ipAddressForAdd.ToString(), Type = dnsRecordType,
+                    Comment = $"Created on {DateTimeOffset.Now:O}"
+                },
                 cancellationToken));
         }
 
