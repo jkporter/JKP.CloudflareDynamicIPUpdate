@@ -1,5 +1,4 @@
 using System.Collections.Frozen;
-using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Serialization;
 using System.Text;
@@ -14,6 +13,7 @@ using JKP.CloudflareDynamicIPUpdate.Notification;
 using JKP.CloudflareDynamicIPUpdate.Serialization;
 using Microsoft.Extensions.Options;
 using Renci.SshNet;
+using IPAddress = System.Net.IPAddress;
 
 namespace JKP.CloudflareDynamicIPUpdate;
 
@@ -84,17 +84,14 @@ public partial class Worker : BackgroundService
                         logIPAddressesArgs.Insert(0, ipAddresses.Count);
                         _logger.LogInformation(logIPAddressesMessage.ToString(), logIPAddressesArgs.ToArray());
 
-                        currentAddresses.IntersectWith(ipAddresses);
-                        ipAddresses.ExceptWith(currentAddresses);
-
-                        if (ipAddresses.Count > 0)
+                        if (ipAddresses.SetEquals(currentAddresses))
                         {
-                            await UpdateDnsRecords(_dynamicUpdateConfig.Domain, ipAddresses, cancellationToken: stoppingToken);
-                            currentAddresses.UnionWith(ipAddresses);
+                            _logger.LogInformation("No DNS records to update.");
                         }
                         else
                         {
-                            _logger.LogInformation("No DNS records to update.");
+                            await UpdateDnsRecords(_dynamicUpdateConfig.Domain, ipAddresses, cancellationToken: stoppingToken);
+                            currentAddresses = ipAddresses;
                         }
                     }
                 }
@@ -207,85 +204,92 @@ public partial class Worker : BackgroundService
         _logger.LogInformation("Found zone {zone} encompassing {hostName}", zone.Name, hostName);
 
         using var client = new CloudFlareClient(_dynamicUpdateConfig.Cloudflare.ApiToken);
-        var dnsRecordsByType = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName },
-                cancellationToken: cancellationToken)).Result
-            .Where(dnsRecord => dnsRecord.Type is DnsRecordType.A & _dynamicUpdateConfig.UpdateIPv4 ||
-                                dnsRecord.Type is DnsRecordType.Aaaa & _dynamicUpdateConfig.UpdateIPv6)
-            .Select((dnsRecord, index) => (DnsRecord: dnsRecord, Order: index + 1))
-            .GroupBy(tuple => tuple.DnsRecord.Type)
-            .ToDictionary(dnsRecord => dnsRecord.Key, dnsRecord => dnsRecord.ToList());
+        var dnsRecords = (await client.Zones.DnsRecords.GetAsync(zone.Id, new DnsRecordFilter { Name = hostName }, cancellationToken: cancellationToken)).Result.ToList();
 
-        foreach (var ipAddress in ipAddresses)
+        List<IPAddress> ipAddressesForAddOrUpdate;
+        foreach (var (dnsRecord, ipAddress) in GetDnsRecordsWithMatchingIPAddress(dnsRecords, ipAddresses, out ipAddressesForAddOrUpdate))
         {
-            DnsRecordType? matchingDnsRecordType = ipAddress.AddressFamily switch
+            if (ipAddress is not null)
             {
-                AddressFamily.InterNetwork => DnsRecordType.A,
-                AddressFamily.InterNetworkV6 => DnsRecordType.Aaaa,
-                _ => null
-            };
-
-            if (matchingDnsRecordType is null)
-            {
+                _logger.LogInformation("The {dnsRecordType} record {id} for {ipAddress} does not require updating.",
+                    AsString(dnsRecord.Type), dnsRecord.Id, ipAddress);
                 continue;
             }
 
-            var matchingDnsRecordsForAddressFamily =
-                dnsRecordsByType.TryGetValue(matchingDnsRecordType.Value, out var value)
-                    ? value
-                    : [];
-            if (matchingDnsRecordsForAddressFamily.Count == 0)
+            var ipAddressesForAddOrUpdateIndex = ipAddressesForAddOrUpdate.FindIndex(ipAddress => GetDnsRecordType(ipAddress) == dnsRecord.Type);
+            if (ipAddressesForAddOrUpdateIndex != -1)
             {
-                _logger.LogInformation("Creating {dnsRecordType} record for {hostname} with {ipAddress}",
-                    AsString(matchingDnsRecordType.Value), hostName, ipAddress);
-                _ = ThrowIfError(await client.Zones.DnsRecords.AddAsync(zone.Id,
-                    new NewDnsRecord
-                    { Name = hostName, Content = ipAddress.ToString(), Type = matchingDnsRecordType.Value },
+                _logger.LogInformation(
+                    "Updating {dnsRecordType} record {id} for {hostname} with from {previousIPAddress} to {ipAddress}",
+                    AsString(dnsRecord.Type),
+                    dnsRecord.Id,
+                    hostName,
+                    dnsRecord.Content, ipAddress);
+                _ = ThrowIfError(await client.Zones.DnsRecords.UpdateAsync(zone.Id,
+                    dnsRecord.Id,
+                    new ModifiedDnsRecord
+                    {
+                        Content = ipAddress.ToString(),
+                        Name = dnsRecord.Name,
+                        Type = dnsRecord.Type
+                    },
                     cancellationToken));
+                ipAddressesForAddOrUpdate.RemoveAt(ipAddressesForAddOrUpdateIndex);
+                continue;
             }
-            else
-            {
-                var matchingDnsRecords = matchingDnsRecordsForAddressFamily.Where(tuple =>
-                        IPAddress.TryParse(tuple.DnsRecord.Content, out var content) && Equals(content, ipAddress))
-                    .ToArray();
 
-                if (matchingDnsRecords.Length > 0)
-                {
-                    _logger.LogInformation("The {dnsRecordType} record {id} for {ipAddress} does not require updating.",
-                        AsString(matchingDnsRecords[0].DnsRecord.Type), matchingDnsRecords[0].DnsRecord.Id, ipAddress);
-                    matchingDnsRecordsForAddressFamily.Remove(matchingDnsRecords[0]);
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Updating {dnsRecordType} record {id} for {hostname} with from {previousIPAddress} to {ipAddress}",
-                        AsString(matchingDnsRecordsForAddressFamily[0].DnsRecord.Type),
-                        matchingDnsRecordsForAddressFamily[0].DnsRecord.Id,
-                        hostName,
-                        matchingDnsRecordsForAddressFamily[0].DnsRecord.Content, ipAddress);
-                    _ = ThrowIfError(await client.Zones.DnsRecords.UpdateAsync(zone.Id,
-                        matchingDnsRecordsForAddressFamily[0].DnsRecord.Id,
-                        new ModifiedDnsRecord
-                        {
-                            Content = ipAddress.ToString(),
-                            Name = matchingDnsRecordsForAddressFamily[0].DnsRecord.Name,
-                            Type = matchingDnsRecordsForAddressFamily[0].DnsRecord.Type
-                        },
-                        cancellationToken));
-
-                    matchingDnsRecordsForAddressFamily.RemoveAt(0);
-                }
-            }
-        }
-
-        foreach (var (dnsRecord, _) in dnsRecordsByType.Values.SelectMany(tuple => tuple).OrderBy(tuple => tuple.Order))
-        {
             _logger.LogInformation("Removing {dnsRecordType} record {id} with {ipAddress} for {hostname}",
                 AsString(dnsRecord.Type),
                 dnsRecord.Id, ipAddresses, hostName);
             _ = ThrowIfError(await client.Zones.DnsRecords.DeleteAsync(zone.Id, dnsRecord.Id, cancellationToken));
         }
 
+        foreach (var ipAddress in ipAddressesForAddOrUpdate)
+        {
+            var dnsRecordType = GetDnsRecordType(ipAddress)!.Value;
+            _logger.LogInformation("Creating {dnsRecordType} record for {hostname} with {ipAddress}",
+                AsString(dnsRecordType), hostName, ipAddress);
+            _ = ThrowIfError(await client.Zones.DnsRecords.AddAsync(zone.Id,
+                new NewDnsRecord
+                    { Name = hostName, Content = ipAddress.ToString(), Type = dnsRecordType },
+                cancellationToken));
+        }
+
         await Task.WhenAll(_notifiers.Select(notifier => notifier.SendNotification(cancellationToken)));
+    }
+
+    static IEnumerable<(DnsRecord DnsRecord, IPAddress? IPAddress)> GetDnsRecordsWithMatchingIPAddress(IEnumerable<DnsRecord> dnsRecords, IEnumerable<IPAddress> ipAddresses, out List<IPAddress> toAdd)
+    {
+        var dnsRecordsAndMatchingIPAddress = new List<(DnsRecord DnsRecord, IPAddress? IPAddress)>();
+        var ipAddressList = ipAddresses.ToList();
+
+        foreach (var dnsRecord in dnsRecords)
+        {
+            var ipAddressIndex = ipAddressList.FindIndex(ipAddress =>
+                GetDnsRecordType(ipAddress) == dnsRecord.Type && ipAddress.Equals(IPAddress.Parse(dnsRecord.Content)));
+            if (ipAddressIndex == -1)
+            {
+                dnsRecordsAndMatchingIPAddress.Add((dnsRecord, null));
+            }
+            else
+            {
+                dnsRecordsAndMatchingIPAddress.Add((dnsRecord, ipAddressList[ipAddressIndex]));
+                ipAddressList.RemoveAt(ipAddressIndex);
+            }
+        }
+
+        toAdd = ipAddressList;
+        return dnsRecordsAndMatchingIPAddress;
+    }
+
+    static DnsRecordType? GetDnsRecordType(IPAddress ipAddress)
+    {
+        return ipAddress.AddressFamily switch
+        {
+            AddressFamily.InterNetwork => DnsRecordType.A,
+            AddressFamily.InterNetworkV6 => DnsRecordType.Aaaa,
+            _ => null
+        };
     }
 
     private static T ThrowIfError<T>(CloudFlareResult<T> result)
